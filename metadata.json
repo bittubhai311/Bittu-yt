@@ -1,0 +1,6 @@
+{
+  "name": "VersionTracker",
+  "description": "Show all installed apps with version info and install date, and keep a permanent local history of every version change.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
