@@ -3,6 +3,6 @@
     <item
         android:width="66dp"
         android:height="66dp"
-        android:drawable="@drawable/ic_version_tracker_1794073850730"
+        android:drawable="@drawable/ic_version_timeline"
         android:gravity="center" />
 </layer-list>
