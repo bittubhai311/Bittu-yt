@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "VersionTracker"
+rootProject.name = "App Info"
 
 include(":app")

@@ -152,8 +152,8 @@ fun MainAppContent(viewModel: MainViewModel = viewModel()) {
                         Text(
                             text = when (currentRoute) {
                                 Screen.History.route -> "Version History"
-                                Screen.Settings.route -> "Settings & Backup"
-                                else -> "VersionTracker"
+                                Screen.Settings.route -> "Settings"
+                                else -> "App Info"
                             },
                             fontWeight = FontWeight.Bold
                         )

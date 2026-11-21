@@ -3,11 +3,11 @@ package com.example.data.repository
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Build
 import android.util.Log
 import com.example.data.local.AppDao
 import com.example.data.local.AppEntity
+import com.example.data.local.LocalJsonStorage
 import com.example.data.local.PackageChangeCount
 import com.example.data.local.SearchHistoryEntity
 import com.example.data.local.VersionHistoryEntity
@@ -20,12 +20,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
-import org.json.JSONException
-import org.json.JSONObject
-import java.io.BufferedReader
-import java.io.InputStreamReader
-import java.io.OutputStreamWriter
 
 sealed class ScanResult {
     data class Success(
@@ -38,39 +32,12 @@ sealed class ScanResult {
     data class Error(val message: String, val cause: Throwable? = null) : ScanResult()
 }
 
-enum class RestoreMode {
-    MERGE,
-    REPLACE
-}
-
-data class ExportResult(
-    val success: Boolean,
-    val appsExported: Int,
-    val historyExported: Int,
-    val message: String
-)
-
-data class ImportResult(
-    val success: Boolean,
-    val importedCount: Int,
-    val message: String
-)
-
-sealed class BackupValidationResult {
-    data class Valid(
-        val schemaVersion: Int,
-        val exportedAt: Long,
-        val apps: List<AppEntity>,
-        val history: List<VersionHistoryEntity>
-    ) : BackupValidationResult()
-
-    data class Invalid(val reason: String) : BackupValidationResult()
-}
-
 class AppRepository(
     private val context: Context,
     private val appDao: AppDao
 ) {
+    private val localJsonStorage = LocalJsonStorage.create(context.applicationContext)
+
     init {
         ensureLastScanTimeInitialized(context.applicationContext)
     }
@@ -80,6 +47,8 @@ class AppRepository(
     val changeCounts: Flow<List<PackageChangeCount>> = appDao.getChangeCountsPerPackage()
     val recentSearches: Flow<List<SearchHistoryEntity>> = appDao.getRecentSearches()
     val lastScanTime: StateFlow<Long> = _lastScanTimeFlow.asStateFlow()
+
+    fun getLocalJsonFilePath(): String = localJsonStorage.getDisplayFilePath()
 
     fun getApp(packageName: String): Flow<AppEntity?> = appDao.getAppFlow(packageName)
     fun getHistoryForPackage(packageName: String): Flow<List<VersionHistoryEntity>> =
@@ -185,6 +154,11 @@ class AppRepository(
                     }
 
                     appDao.commitScanChanges(appsToUpsert, historyToInsert)
+                    localJsonStorage.saveAllData(
+                        apps = appsToUpsert,
+                        allHistory = appDao.getAllHistorySync(),
+                        updatedAt = now
+                    )
                     saveLastScanTime(now)
                     Log.d(TAG, "Initial baseline scan completed: ${appsToUpsert.size} apps indexed")
                     return@withLock ScanResult.Success(
@@ -357,6 +331,26 @@ class AppRepository(
                 }
 
                 appDao.commitScanChanges(appsToUpsert, historyToInsert)
+
+                // Keep the single local JSON file in sync whenever data changed or file doesn't exist yet
+                if (appsToUpsert.isNotEmpty() || historyToInsert.isNotEmpty() || !localJsonStorage.hasJsonFile()) {
+                    val latestAppsSnapshot = if (appsToUpsert.isNotEmpty()) {
+                        appDao.getAllAppsSync()
+                    } else {
+                        existingApps
+                    }
+                    val latestHistorySnapshot = if (historyToInsert.isNotEmpty()) {
+                        appDao.getAllHistorySync()
+                    } else {
+                        allExistingHistory
+                    }
+                    localJsonStorage.saveAllData(
+                        apps = latestAppsSnapshot,
+                        allHistory = latestHistorySnapshot,
+                        updatedAt = now
+                    )
+                }
+
                 saveLastScanTime(now)
                 Log.d(
                     TAG,
@@ -444,244 +438,15 @@ class AppRepository(
         }
     }
 
-    suspend fun exportBackupWithDetails(uri: Uri): ExportResult = withContext(Dispatchers.IO) {
-        scanMutex.withLock {
-            try {
-                val apps = appDao.getAllAppsSync()
-                val history = appDao.getAllHistorySync()
-
-                val rootJson = serializeBackupToJson(apps, history, System.currentTimeMillis())
-
-                val outputStream = try {
-                    context.contentResolver.openOutputStream(uri, "wt")
-                } catch (_: Exception) {
-                    context.contentResolver.openOutputStream(uri)
-                } ?: return@withLock ExportResult(
-                    success = false,
-                    appsExported = 0,
-                    historyExported = 0,
-                    message = "Failed to export: could not open destination file"
-                )
-
-                outputStream.use { stream ->
-                    OutputStreamWriter(stream, Charsets.UTF_8).use { writer ->
-                        writer.write(rootJson.toString(2))
-                        writer.flush()
-                    }
-                }
-
-                val message = if (apps.isEmpty() && history.isEmpty()) {
-                    "Exported empty backup (0 apps, 0 history records)"
-                } else {
-                    "Backup exported: ${apps.size} apps, ${history.size} history records"
-                }
-                ExportResult(
-                    success = true,
-                    appsExported = apps.size,
-                    historyExported = history.size,
-                    message = message
-                )
-            } catch (ce: CancellationException) {
-                throw ce
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to export backup", e)
-                ExportResult(
-                    success = false,
-                    appsExported = 0,
-                    historyExported = 0,
-                    message = "Failed to export backup: ${e.localizedMessage ?: "I/O error"}"
-                )
-            }
-        }
-    }
-
-    suspend fun exportBackup(uri: Uri): Boolean = exportBackupWithDetails(uri).success
-
-    suspend fun importBackup(
-        uri: Uri,
-        mode: RestoreMode = RestoreMode.MERGE
-    ): ImportResult = withContext(Dispatchers.IO) {
-        scanMutex.withLock {
-            try {
-                val content = StringBuilder()
-                context.contentResolver.openInputStream(uri)?.use { inputStream ->
-                    BufferedReader(InputStreamReader(inputStream, Charsets.UTF_8)).use { reader ->
-                        var line: String? = reader.readLine()
-                        while (line != null) {
-                            content.append(line).append("\n")
-                            line = reader.readLine()
-                        }
-                    }
-                } ?: return@withLock ImportResult(false, 0, "Unable to read selected backup file")
-
-                val validation = parseAndValidateBackupJson(content.toString())
-                if (validation is BackupValidationResult.Invalid) {
-                    Log.w(TAG, "Rejected invalid backup file: ${validation.reason}")
-                    return@withLock ImportResult(false, 0, validation.reason)
-                }
-
-                val validBackup = validation as BackupValidationResult.Valid
-                val backupApps = validBackup.apps
-                val backupHistory = validBackup.history
-
-                val existingApps = appDao.getAllAppsSync()
-                val existingHistory = appDao.getAllHistorySync()
-
-                // Handle empty backup files safely
-                if (backupApps.isEmpty() && backupHistory.isEmpty()) {
-                    return@withLock if (mode == RestoreMode.REPLACE && (existingApps.isNotEmpty() || existingHistory.isNotEmpty())) {
-                        ImportResult(
-                            success = false,
-                            importedCount = 0,
-                            message = "Restore aborted: backup file is empty and would erase existing local data"
-                        )
-                    } else {
-                        ImportResult(
-                            success = true,
-                            importedCount = 0,
-                            message = "Backup file is empty (0 records imported)"
-                        )
-                    }
-                }
-
-                val pm = context.packageManager
-
-                if (mode == RestoreMode.REPLACE) {
-                    val existingAppsMap = existingApps.associateBy { it.packageName }
-                    val reconciledApps = backupApps.map { backupApp ->
-                        val currentlyInstalled = isPackageStillInstalled(pm, backupApp.packageName)
-                        val liveLocal = existingAppsMap[backupApp.packageName]
-                        // If app is currently installed and local record is newer than the backup,
-                        // keep the live version metadata so the next scan does not log a fake update.
-                        if (currentlyInstalled && liveLocal != null && liveLocal.isInstalled &&
-                            (liveLocal.versionCode > backupApp.versionCode ||
-                                (liveLocal.versionCode == backupApp.versionCode && liveLocal.lastUpdateTime > backupApp.lastUpdateTime))
-                        ) {
-                            val earliestInstall = if (backupApp.firstInstallTime in 1 until liveLocal.firstInstallTime) {
-                                backupApp.firstInstallTime
-                            } else {
-                                liveLocal.firstInstallTime
-                            }
-                            liveLocal.copy(firstInstallTime = earliestInstall, isInstalled = true)
-                        } else {
-                            backupApp.copy(isInstalled = backupApp.isInstalled && currentlyInstalled)
-                        }
-                    }
-
-                    appDao.replaceAllDataWithBackup(reconciledApps, backupHistory)
-                    val total = reconciledApps.size + backupHistory.size
-                    return@withLock ImportResult(
-                        success = true,
-                        importedCount = total,
-                        message = "Database replaced: $total records restored (${reconciledApps.size} apps, ${backupHistory.size} history)"
-                    )
-                }
-
-                // RestoreMode.MERGE: preserve newer local data and avoid duplicates
-                val existingAppsMap = existingApps.associateBy { it.packageName }
-                val existingHistoryExactKeys = HashSet<String>(existingHistory.size * 2)
-                val existingHistoryTransitionKeys = HashSet<String>(existingHistory.size * 2)
-                for (h in existingHistory) {
-                    existingHistoryKeysAdd(existingHistoryExactKeys, existingHistoryTransitionKeys, h)
-                }
-
-                val appsToUpsert = mutableListOf<AppEntity>()
-                for (backupApp in backupApps) {
-                    val pkgName = backupApp.packageName
-                    val currentlyInstalled = isPackageStillInstalled(pm, pkgName)
-                    val existingApp = existingAppsMap[pkgName]
-
-                    if (existingApp == null) {
-                        appsToUpsert.add(
-                            backupApp.copy(isInstalled = backupApp.isInstalled && currentlyInstalled)
-                        )
-                    } else if (existingApp.isInstalled) {
-                        // Local app is currently installed: never overwrite its live version with older backup data.
-                        // Only backfill an earlier firstInstallTime if the backup has a valid older install timestamp.
-                        if (backupApp.firstInstallTime > 0L &&
-                            (existingApp.firstInstallTime <= 0L || backupApp.firstInstallTime < existingApp.firstInstallTime)
-                        ) {
-                            appsToUpsert.add(existingApp.copy(firstInstallTime = backupApp.firstInstallTime))
-                        }
-                    } else {
-                        // Local app is marked uninstalled: only update if backup record has newer version/timestamp
-                        val isBackupNewer = backupApp.versionCode > existingApp.versionCode ||
-                            (backupApp.versionCode == existingApp.versionCode && backupApp.lastUpdateTime > existingApp.lastUpdateTime)
-                        if (isBackupNewer) {
-                            val earliestInstall = if (existingApp.firstInstallTime in 1 until backupApp.firstInstallTime) {
-                                existingApp.firstInstallTime
-                            } else {
-                                backupApp.firstInstallTime
-                            }
-                            appsToUpsert.add(
-                                backupApp.copy(
-                                    firstInstallTime = earliestInstall,
-                                    isInstalled = backupApp.isInstalled && currentlyInstalled
-                                )
-                            )
-                        }
-                    }
-                }
-
-                val historyToInsert = mutableListOf<VersionHistoryEntity>()
-                for (h in backupHistory) {
-                    val exactKey = "${h.packageName}|${h.newVersionCode}|${h.detectedTime}"
-                    val transitionKey = "${h.packageName}|${h.changeType}|${h.oldVersionCode}|${h.newVersionCode}|${h.newVersionName}|${h.systemUpdateTime}"
-
-                    val isNewExact = !existingHistoryExactKeys.contains(exactKey)
-                    val isNewTransition = if (h.systemUpdateTime > 0L) {
-                        !existingHistoryTransitionKeys.contains(transitionKey)
-                    } else {
-                        true
-                    }
-
-                    if (isNewExact && isNewTransition &&
-                        appDao.countExactHistory(h.packageName, h.newVersionCode, h.detectedTime) == 0
-                    ) {
-                        existingHistoryKeysAdd(existingHistoryExactKeys, existingHistoryTransitionKeys, h)
-                        historyToInsert.add(h)
-                    }
-                }
-
-                appDao.commitScanChanges(appsToUpsert, historyToInsert)
-
-                val importedApps = appsToUpsert.size
-                val importedHistory = historyToInsert.size
-                val total = importedApps + importedHistory
-                val msg = if (total == 0) {
-                    "0 records imported (all backup records already exist locally)"
-                } else {
-                    "$total records imported ($importedApps apps, $importedHistory history)"
-                }
-                ImportResult(true, total, msg)
-            } catch (ce: CancellationException) {
-                throw ce
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to import backup", e)
-                ImportResult(false, 0, "Failed to import: ${e.localizedMessage ?: "Invalid backup file"}")
-            }
-        }
-    }
-
     companion object {
         private const val TAG = "AppRepository"
         private const val PREFS_NAME = "version_tracker_prefs"
         private const val KEY_LAST_SUCCESSFUL_SCAN_TIME = "last_successful_scan_time"
 
-        const val BACKUP_FORMAT_ID = "versiontracker_backup"
-        const val CURRENT_BACKUP_SCHEMA_VERSION = 1
-
         const val CHANGE_INSTALLED = "INSTALLED"
         const val CHANGE_UPDATED = "UPDATED"
         const val CHANGE_DOWNGRADED = "DOWNGRADED"
         const val CHANGE_UNINSTALLED = "UNINSTALLED"
-
-        private val VALID_CHANGE_TYPES = setOf(
-            CHANGE_INSTALLED,
-            CHANGE_UPDATED,
-            CHANGE_DOWNGRADED,
-            CHANGE_UNINSTALLED
-        )
 
         private val scanMutex = Mutex()
         private val _lastScanTimeFlow = MutableStateFlow(0L)
@@ -698,248 +463,6 @@ class AppRepository(
                     }
                 }
             }
-        }
-
-        private fun existingHistoryKeysAdd(
-            exactKeys: MutableSet<String>,
-            transitionKeys: MutableSet<String>,
-            h: VersionHistoryEntity
-        ) {
-            exactKeys.add("${h.packageName}|${h.newVersionCode}|${h.detectedTime}")
-            if (h.systemUpdateTime > 0L) {
-                transitionKeys.add(
-                    "${h.packageName}|${h.changeType}|${h.oldVersionCode}|${h.newVersionCode}|${h.newVersionName}|${h.systemUpdateTime}"
-                )
-            }
-        }
-
-        fun serializeBackupToJson(
-            apps: List<AppEntity>,
-            history: List<VersionHistoryEntity>,
-            exportedAt: Long = System.currentTimeMillis()
-        ): JSONObject {
-            return JSONObject().apply {
-                put("format", BACKUP_FORMAT_ID)
-                put("schemaVersion", CURRENT_BACKUP_SCHEMA_VERSION)
-                put("version", CURRENT_BACKUP_SCHEMA_VERSION)
-                put("exportedAt", exportedAt)
-
-                val appsArray = JSONArray()
-                for (app in apps) {
-                    val obj = JSONObject().apply {
-                        put("packageName", app.packageName)
-                        put("appName", app.appName)
-                        put("versionName", app.versionName)
-                        put("versionCode", app.versionCode)
-                        put("firstInstallTime", app.firstInstallTime)
-                        put("lastUpdateTime", app.lastUpdateTime)
-                        put("isSystemApp", app.isSystemApp)
-                        put("isInstalled", app.isInstalled)
-                    }
-                    appsArray.put(obj)
-                }
-                put("apps", appsArray)
-
-                val historyArray = JSONArray()
-                for (h in history) {
-                    val obj = JSONObject().apply {
-                        put("packageName", h.packageName)
-                        put("appName", h.appName)
-                        put("oldVersionName", h.oldVersionName ?: JSONObject.NULL)
-                        put("oldVersionCode", h.oldVersionCode ?: JSONObject.NULL)
-                        put("newVersionName", h.newVersionName)
-                        put("newVersionCode", h.newVersionCode)
-                        put("detectedTime", h.detectedTime)
-                        put("systemUpdateTime", h.systemUpdateTime)
-                        put("changeType", h.changeType)
-                    }
-                    historyArray.put(obj)
-                }
-                put("history", historyArray)
-            }
-        }
-
-        /**
-         * Strictly validates the entire backup JSON string in memory before any database modification.
-         */
-        fun parseAndValidateBackupJson(rawJson: String): BackupValidationResult {
-            val trimmed = rawJson.trim()
-            if (trimmed.isEmpty()) {
-                return BackupValidationResult.Invalid("Invalid backup: file is empty")
-            }
-
-            val rootJson = try {
-                JSONObject(trimmed)
-            } catch (e: JSONException) {
-                return BackupValidationResult.Invalid("Invalid backup: malformed JSON format")
-            }
-
-            if (rootJson.has("format")) {
-                val format = rootJson.optString("format", "")
-                if (format != BACKUP_FORMAT_ID) {
-                    return BackupValidationResult.Invalid("Incompatible backup format: '$format'")
-                }
-            }
-
-            val schemaVersion = when {
-                rootJson.has("schemaVersion") -> rootJson.optInt("schemaVersion", -1)
-                rootJson.has("version") -> rootJson.optInt("version", -1)
-                else -> 1
-            }
-
-            if (schemaVersion < 1 || schemaVersion > CURRENT_BACKUP_SCHEMA_VERSION) {
-                return BackupValidationResult.Invalid(
-                    "Unsupported backup schema version: $schemaVersion (supported: 1..$CURRENT_BACKUP_SCHEMA_VERSION)"
-                )
-            }
-
-            val hasAppsKey = rootJson.has("apps") && !rootJson.isNull("apps")
-            val hasHistoryKey = rootJson.has("history") && !rootJson.isNull("history")
-            if (!hasAppsKey && !hasHistoryKey) {
-                return BackupValidationResult.Invalid("Invalid backup format: missing 'apps' and 'history' arrays")
-            }
-
-            val appsArray = if (hasAppsKey) {
-                rootJson.optJSONArray("apps")
-                    ?: return BackupValidationResult.Invalid("Invalid backup format: 'apps' must be a JSON array")
-            } else {
-                null
-            }
-
-            val historyArray = if (hasHistoryKey) {
-                rootJson.optJSONArray("history")
-                    ?: return BackupValidationResult.Invalid("Invalid backup format: 'history' must be a JSON array")
-            } else {
-                null
-            }
-
-            // Validate and deduplicate apps within the backup
-            val validatedAppsByPkg = LinkedHashMap<String, AppEntity>()
-            if (appsArray != null) {
-                for (i in 0 until appsArray.length()) {
-                    val obj = appsArray.optJSONObject(i)
-                        ?: return BackupValidationResult.Invalid("Corrupt backup: app entry at index $i is not a JSON object")
-
-                    val pkgName = obj.optString("packageName", "").trim()
-                    if (pkgName.isEmpty() || obj.isNull("packageName")) {
-                        return BackupValidationResult.Invalid("Corrupt backup: app entry at index $i is missing packageName")
-                    }
-
-                    val versionCode = obj.optLong("versionCode", -1L)
-                    if (versionCode < 0L) {
-                        return BackupValidationResult.Invalid("Corrupt backup: app '$pkgName' has invalid versionCode")
-                    }
-
-                    val firstInstallTime = obj.optLong("firstInstallTime", 0L)
-                    val lastUpdateTime = obj.optLong("lastUpdateTime", 0L)
-                    if (firstInstallTime < 0L || lastUpdateTime < 0L) {
-                        return BackupValidationResult.Invalid("Corrupt backup: app '$pkgName' has negative timestamp")
-                    }
-
-                    val rawAppName = if (obj.isNull("appName")) pkgName else obj.optString("appName", pkgName).trim()
-                    val rawVerName = if (obj.isNull("versionName")) "Unknown" else obj.optString("versionName", "Unknown").trim()
-
-                    val candidate = AppEntity(
-                        packageName = pkgName,
-                        appName = rawAppName.ifEmpty { pkgName },
-                        versionName = rawVerName.ifEmpty { "Unknown" },
-                        versionCode = versionCode,
-                        firstInstallTime = firstInstallTime,
-                        lastUpdateTime = lastUpdateTime,
-                        isSystemApp = obj.optBoolean("isSystemApp", false),
-                        isInstalled = obj.optBoolean("isInstalled", true)
-                    )
-
-                    val prev = validatedAppsByPkg[pkgName]
-                    if (prev == null ||
-                        candidate.versionCode > prev.versionCode ||
-                        (candidate.versionCode == prev.versionCode && candidate.lastUpdateTime > prev.lastUpdateTime)
-                    ) {
-                        validatedAppsByPkg[pkgName] = candidate
-                    }
-                }
-            }
-
-            // Validate and deduplicate history entries within the backup
-            val validatedHistory = mutableListOf<VersionHistoryEntity>()
-            val seenHistoryKeys = HashSet<String>()
-            if (historyArray != null) {
-                for (i in 0 until historyArray.length()) {
-                    val obj = historyArray.optJSONObject(i)
-                        ?: return BackupValidationResult.Invalid("Corrupt backup: history entry at index $i is not a JSON object")
-
-                    val pkgName = obj.optString("packageName", "").trim()
-                    if (pkgName.isEmpty() || obj.isNull("packageName")) {
-                        return BackupValidationResult.Invalid("Corrupt backup: history entry at index $i is missing packageName")
-                    }
-
-                    if (!obj.has("newVersionCode") || obj.isNull("newVersionCode")) {
-                        return BackupValidationResult.Invalid("Corrupt backup: history entry for '$pkgName' at index $i is missing newVersionCode")
-                    }
-                    val newVersionCode = obj.optLong("newVersionCode", -1L)
-                    if (newVersionCode < 0L) {
-                        return BackupValidationResult.Invalid("Corrupt backup: history entry for '$pkgName' has invalid newVersionCode")
-                    }
-
-                    val detectedTime = obj.optLong("detectedTime", -1L)
-                    if (detectedTime <= 0L) {
-                        return BackupValidationResult.Invalid("Corrupt backup: history entry for '$pkgName' at index $i has invalid detectedTime")
-                    }
-
-                    val changeType = obj.optString("changeType", CHANGE_UPDATED).trim().uppercase()
-                    if (changeType !in VALID_CHANGE_TYPES) {
-                        return BackupValidationResult.Invalid("Corrupt backup: history entry for '$pkgName' has invalid changeType '$changeType'")
-                    }
-
-                    val oldName = if (!obj.has("oldVersionName") || obj.isNull("oldVersionName")) {
-                        null
-                    } else {
-                        obj.optString("oldVersionName").trim().ifEmpty { null }
-                    }
-                    val oldCode = if (!obj.has("oldVersionCode") || obj.isNull("oldVersionCode")) {
-                        null
-                    } else {
-                        val parsed = obj.optLong("oldVersionCode", -1L)
-                        if (parsed < 0L) {
-                            return BackupValidationResult.Invalid("Corrupt backup: history entry for '$pkgName' has negative oldVersionCode")
-                        }
-                        parsed
-                    }
-
-                    val systemUpdateTime = obj.optLong("systemUpdateTime", detectedTime)
-                    if (systemUpdateTime < 0L) {
-                        return BackupValidationResult.Invalid("Corrupt backup: history entry for '$pkgName' has negative systemUpdateTime")
-                    }
-
-                    val rawAppName = if (obj.isNull("appName")) pkgName else obj.optString("appName", pkgName).trim()
-                    val rawNewVerName = if (obj.isNull("newVersionName")) "Unknown" else obj.optString("newVersionName", "Unknown").trim()
-
-                    val dedupKey = "$pkgName|$newVersionCode|$detectedTime|$changeType"
-                    if (seenHistoryKeys.add(dedupKey)) {
-                        validatedHistory.add(
-                            VersionHistoryEntity(
-                                packageName = pkgName,
-                                appName = rawAppName.ifEmpty { pkgName },
-                                oldVersionName = oldName,
-                                oldVersionCode = oldCode,
-                                newVersionName = rawNewVerName.ifEmpty { "Unknown" },
-                                newVersionCode = newVersionCode,
-                                detectedTime = detectedTime,
-                                systemUpdateTime = systemUpdateTime,
-                                changeType = changeType
-                            )
-                        )
-                    }
-                }
-            }
-
-            val exportedAt = rootJson.optLong("exportedAt", 0L)
-            return BackupValidationResult.Valid(
-                schemaVersion = schemaVersion,
-                exportedAt = exportedAt,
-                apps = validatedAppsByPkg.values.toList(),
-                history = validatedHistory
-            )
         }
     }
 }

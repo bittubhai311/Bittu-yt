@@ -1,6 +1,6 @@
-# VersionTracker
+# App Info
 
-**VersionTracker** is a 100% local, privacy-focused native Android application built with **Kotlin**, **Jetpack Compose (Material 3)**, **Room SQLite Database**, and **WorkManager**. It scans installed applications via `PackageManager` and keeps a permanent on-device history of every app installation, version update, version downgrade, and uninstallation.
+**App Info** is a 100% local, privacy-focused native Android application built with **Kotlin**, **Jetpack Compose (Material 3)**, **Room SQLite Database**, and **WorkManager**. It scans installed applications via `PackageManager` and keeps a permanent on-device history of every app installation, version update, version downgrade, and uninstallation.
 
 ---
 
@@ -11,7 +11,7 @@
 - **App Detail Timeline**: Displays per-app metadata, chronological version timeline (`old -> new`), and shortcuts to launch the app or open Android System App Info.
 - **Global History Feed**: Displays all version events grouped by date (`Today`, `Yesterday`, or `dd MMM yyyy`) with search and change-type filter chips.
 - **Periodic Background Scanning**: Uses `WorkManager` (`PeriodicWorkRequest` at Android's 15-minute minimum interval with `ExistingPeriodicWorkPolicy.KEEP`) and posts grouped notifications on genuine updates or downgrades.
-- **Backup & Restore (Storage Access Framework)**: Exports and restores both `apps` and `version_history` tables as schema-versioned JSON (`schemaVersion = 1`) with full in-memory validation and user-selectable **Merge** or **Replace** modes.
+- **Single Local JSON Storage**: Automatically saves all tracked apps' names, metadata, and version history into one local JSON file (`Android/data/com.appinfo.android/files/app_info_data.json`) without creating per-app folders or requiring storage permissions.
 
 ---
 

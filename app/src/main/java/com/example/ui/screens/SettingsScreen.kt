@@ -20,43 +20,29 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BatteryAlert
-import androidx.compose.material.icons.filled.FileDownload
-import androidx.compose.material.icons.filled.FileUpload
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Divider
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.example.data.repository.RestoreMode
 import com.example.ui.viewmodel.MainViewModel
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -72,82 +58,18 @@ fun SettingsScreen(
     val allApps by viewModel.allApps.collectAsStateWithLifecycle()
     val allHistory by viewModel.allHistory.collectAsStateWithLifecycle()
     val isScanning by viewModel.isScanning.collectAsStateWithLifecycle()
-    val isBackupBusy by viewModel.isBackupBusy.collectAsStateWithLifecycle()
     val lastScanError by viewModel.lastScanError.collectAsStateWithLifecycle()
     val notificationsEnabled by viewModel.notificationsEnabled.collectAsStateWithLifecycle()
     val notificationAvailabilityNote by viewModel.notificationAvailabilityNote.collectAsStateWithLifecycle()
     val lastScanTime by viewModel.lastScanTime.collectAsStateWithLifecycle()
 
     val dateFormat = remember { SimpleDateFormat("dd MMM yyyy, HH:mm", Locale.getDefault()) }
-    var pendingImportUri by remember { mutableStateOf<Uri?>(null) }
 
     // On-demand permission request triggered only when user explicitly turns ON the notification toggle
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         viewModel.toggleNotifications(isGranted)
-    }
-
-    // SAF Document creation for Export
-    val exportLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.CreateDocument("application/json")
-    ) { uri: Uri? ->
-        if (uri != null) {
-            viewModel.exportBackup(uri)
-        }
-    }
-
-    // SAF Document picker for Import
-    val importLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? ->
-        if (uri != null) {
-            pendingImportUri = uri
-        }
-    }
-
-    pendingImportUri?.let { selectedUri ->
-        AlertDialog(
-            onDismissRequest = { pendingImportUri = null },
-            title = { Text("Import Backup Data") },
-            text = {
-                Text(
-                    "Choose how to restore this backup:\n\n" +
-                        "• Merge (Recommended): Adds missing apps and history records without duplicates and preserves newer local data.\n\n" +
-                        "• Replace: Replaces all existing app and version history records with the backup file."
-                )
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        pendingImportUri = null
-                        viewModel.importBackup(selectedUri, RestoreMode.MERGE)
-                    },
-                    modifier = Modifier.testTag("restore_merge_button")
-                ) {
-                    Text("Merge")
-                }
-            },
-            dismissButton = {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(
-                        onClick = { pendingImportUri = null },
-                        modifier = Modifier.testTag("restore_cancel_button")
-                    ) {
-                        Text("Cancel")
-                    }
-                    OutlinedButton(
-                        onClick = {
-                            pendingImportUri = null
-                            viewModel.importBackup(selectedUri, RestoreMode.REPLACE)
-                        },
-                        modifier = Modifier.testTag("restore_replace_button")
-                    ) {
-                        Text("Replace")
-                    }
-                }
-            }
-        )
     }
 
     LazyColumn(
@@ -167,7 +89,7 @@ fun SettingsScreen(
             ) {
                 Column(modifier = Modifier.padding(20.dp)) {
                     Text(
-                        text = "VersionTracker",
+                        text = "App Info",
                         style = MaterialTheme.typography.headlineSmall,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onPrimaryContainer
@@ -447,94 +369,7 @@ fun SettingsScreen(
             }
         }
 
-        // Section: Data Backup & Restore
-        item {
-            Text(
-                text = "Backup & Storage (SAF)",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
-            )
-        }
-
-        item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                elevation = CardDefaults.cardElevation(1.dp)
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "Local Storage & Migration",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Text(
-                        text = "Export full database (both apps and version history) as JSON or merge an existing backup.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-
-                    if (isBackupBusy) {
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(16.dp),
-                                strokeWidth = 2.dp
-                            )
-                            Text(
-                                text = "Processing backup file...",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        Button(
-                            onClick = {
-                                val dateStr = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
-                                exportLauncher.launch("versiontracker_backup_$dateStr.json")
-                            },
-                            enabled = !isBackupBusy && !isScanning,
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("export_backup_button"),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Icon(Icons.Default.FileUpload, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Export JSON")
-                        }
-
-                        OutlinedButton(
-                            onClick = {
-                                importLauncher.launch(arrayOf("application/json", "*/*"))
-                            },
-                            enabled = !isBackupBusy && !isScanning,
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("import_backup_button"),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Icon(Icons.Default.FileDownload, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Import JSON")
-                        }
-                    }
-                }
-            }
-        }
-
-        // Local storage badge
+        // Local JSON storage info
         item {
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -554,12 +389,12 @@ fun SettingsScreen(
                     Spacer(modifier = Modifier.width(12.dp))
                     Column {
                         Text(
-                            text = "100% Private & Device-Local",
+                            text = "100% Private & Local JSON Storage",
                             style = MaterialTheme.typography.labelLarge,
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Stored entirely in Room SQLite. No cloud, no analytics, no external network requests.",
+                            text = "All apps and version history are automatically saved in one local JSON file at ${viewModel.getLocalJsonFilePath()}. No cloud or external network requests.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )

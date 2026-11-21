@@ -1,10 +1,17 @@
 package com.example
 
 import com.example.data.local.AppEntity
+import com.example.data.local.LocalJsonStorage
 import com.example.data.local.VersionHistoryEntity
+import com.example.data.repository.AppRepository
+import com.example.data.repository.ScanResult
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
+import java.nio.file.Files
 
 class ExampleUnitTest {
     @Test
@@ -75,12 +82,6 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun testEmptyBackupValidationRejectsBlankInput() {
-        val result = com.example.data.repository.AppRepository.parseAndValidateBackupJson("   ")
-        org.junit.Assert.assertTrue(result is com.example.data.repository.BackupValidationResult.Invalid)
-    }
-
-    @Test
     fun testScanResultDefaults() {
         val change = VersionHistoryEntity(
             id = 2L,
@@ -92,9 +93,9 @@ class ExampleUnitTest {
             newVersionCode = 2L,
             detectedTime = 1700000050000L,
             systemUpdateTime = 1700000040000L,
-            changeType = com.example.data.repository.AppRepository.CHANGE_UPDATED
+            changeType = AppRepository.CHANGE_UPDATED
         )
-        val scanSuccess = com.example.data.repository.ScanResult.Success(
+        val scanSuccess = ScanResult.Success(
             updatedOrDowngraded = listOf(change),
             totalScanned = 42,
             scanTimestamp = 1700000050000L
@@ -102,5 +103,74 @@ class ExampleUnitTest {
         assertEquals(42, scanSuccess.totalScanned)
         assertEquals(1, scanSuccess.totalChangesDetected)
         assertEquals(1700000050000L, scanSuccess.scanTimestamp)
+    }
+
+    @Test
+    fun testLocalJsonStorageWritesSingleFileWithAllAppsAndCleansLegacyFolders() {
+        val tempRoot = Files.createTempDirectory("appinfo_single_json_test").toFile()
+        try {
+            // Simulate a legacy per-app subfolder that should be cleaned up
+            val legacyFolder = File(tempRoot, "apps/com.whatsapp")
+            legacyFolder.mkdirs()
+            File(legacyFolder, "app_info.json").writeText("{}")
+
+            val storage = LocalJsonStorage(tempRoot, hostPackageName = "com.appinfo.android")
+            val appA = AppEntity(
+                packageName = "com.whatsapp",
+                appName = "WhatsApp",
+                versionName = "2.24.5",
+                versionCode = 2245L,
+                firstInstallTime = 1700000000000L,
+                lastUpdateTime = 1700000100000L,
+                isSystemApp = false,
+                isInstalled = true
+            )
+            val appB = AppEntity(
+                packageName = "com.android.chrome",
+                appName = "Chrome",
+                versionName = "128.0",
+                versionCode = 1280L,
+                firstInstallTime = 1690000000000L,
+                lastUpdateTime = 1700000200000L,
+                isSystemApp = true,
+                isInstalled = true
+            )
+            val historyA = VersionHistoryEntity(
+                id = 10L,
+                packageName = "com.whatsapp",
+                appName = "WhatsApp",
+                oldVersionName = "2.24.1",
+                oldVersionCode = 2241L,
+                newVersionName = "2.24.5",
+                newVersionCode = 2245L,
+                detectedTime = 1700000150000L,
+                systemUpdateTime = 1700000100000L,
+                changeType = "UPDATED"
+            )
+
+            val saved = storage.saveAllData(
+                apps = listOf(appA, appB),
+                allHistory = listOf(historyA),
+                updatedAt = 1700000200000L
+            )
+            assertTrue(saved)
+
+            // Only one single JSON file should exist, with no per-app subfolders
+            val jsonFile = File(tempRoot, LocalJsonStorage.DATA_FILE_NAME)
+            assertTrue(jsonFile.isFile)
+            assertFalse(File(tempRoot, "apps").exists())
+            assertEquals(1, tempRoot.listFiles()?.size)
+
+            val content = jsonFile.readText(Charsets.UTF_8)
+            assertTrue(content.contains("\"appPackage\": \"com.appinfo.android\""))
+            assertTrue(content.contains("\"totalApps\": 2"))
+            assertTrue(content.contains("\"appName\": \"WhatsApp\""))
+            assertTrue(content.contains("\"packageName\": \"com.whatsapp\""))
+            assertTrue(content.contains("\"appName\": \"Chrome\""))
+            assertTrue(content.contains("\"packageName\": \"com.android.chrome\""))
+            assertTrue(content.contains("\"newVersionName\": \"2.24.5\""))
+        } finally {
+            tempRoot.deleteRecursively()
+        }
     }
 }

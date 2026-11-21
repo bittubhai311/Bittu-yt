@@ -1,7 +1,6 @@
 package com.example.ui.viewmodel
 
 import android.app.Application
-import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -55,9 +54,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _isScanning = MutableStateFlow(false)
     val isScanning: StateFlow<Boolean> = _isScanning.asStateFlow()
-
-    private val _isBackupBusy = MutableStateFlow(false)
-    val isBackupBusy: StateFlow<Boolean> = _isBackupBusy.asStateFlow()
 
     private val _lastScanError = MutableStateFlow<String?>(null)
     val lastScanError: StateFlow<String?> = _lastScanError.asStateFlow()
@@ -290,40 +286,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun exportBackup(uri: Uri) {
-        if (_isBackupBusy.value) return
-        _isBackupBusy.value = true
-        viewModelScope.launch {
-            try {
-                val result = repository.exportBackupWithDetails(uri)
-                _snackbarMessage.value = result.message
-            } finally {
-                _isBackupBusy.value = false
-            }
-        }
-    }
-
-    fun importBackup(
-        uri: Uri,
-        mode: com.example.data.repository.RestoreMode = com.example.data.repository.RestoreMode.MERGE
-    ) {
-        if (_isBackupBusy.value) return
-        _isBackupBusy.value = true
-        viewModelScope.launch {
-            try {
-                val result = repository.importBackup(uri, mode)
-                _snackbarMessage.value = result.message
-                if (result.success) {
-                    refreshScan(isInitial = true)
-                }
-            } finally {
-                _isBackupBusy.value = false
-            }
-        }
-    }
-
     fun getAppDetailFlow(packageName: String) = repository.getApp(packageName)
     fun getAppHistoryFlow(packageName: String) = repository.getHistoryForPackage(packageName)
+    fun getLocalJsonFilePath(): String = repository.getLocalJsonFilePath()
 
     companion object {
         private const val TAG = "MainViewModel"
